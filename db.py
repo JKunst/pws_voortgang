@@ -207,20 +207,60 @@ def set_partner(eckid: str, partner_eckid: str | None) -> None:
         conn.close()
 
 
+
+
+def _enrich_koppel(conn, koppel: dict) -> dict:
+    """Verrijk een koppel-rij met leden, onderzoek en voortgang."""
+    import json as _json
+    k = dict(koppel)
+    leden = conn.execute(
+        "SELECT * FROM users WHERE koppel_id = ?", (k["id"],)
+    ).fetchall()
+    k["leden"] = [dict(l) for l in leden]
+
+    onderzoek = conn.execute(
+        "SELECT * FROM pws_onderzoek WHERE koppel_id = ?", (k["id"],)
+    ).fetchone()
+    if onderzoek:
+        o = dict(onderzoek)
+        o["deelvragen"] = _json.loads(o.get("deelvragen_json") or "[]")
+        k["onderzoek"] = o
+    else:
+        k["onderzoek"] = {
+            "onderwerp": None, "vak": None, "hoofdvraag": None,
+            "deelvragen": [], "bijgewerkt": None,
+        }
+
+    voortgang = conn.execute(
+        "SELECT sleutel, voltooid FROM pws_voortgang WHERE koppel_id = ?", (k["id"],)
+    ).fetchall()
+    k["voortgang"] = {r["sleutel"]: bool(r["voltooid"]) for r in voortgang}
+    return k
+
 def get_koppel(koppel_id: int) -> dict | None:
     conn = get_conn()
     row = conn.execute("SELECT * FROM pws_koppel WHERE id = ?", (koppel_id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    result = _enrich_koppel(conn, dict(row))
     conn.close()
-    return dict(row) if row else None
+    return result
 
 
 def get_my_koppel(eckid: str) -> dict | None:
     conn = get_conn()
     row = conn.execute("SELECT koppel_id FROM users WHERE eckid = ?", (eckid,)).fetchone()
-    conn.close()
     if not row or not row["koppel_id"]:
+        conn.close()
         return None
-    return get_koppel(row["koppel_id"])
+    koppel = conn.execute("SELECT * FROM pws_koppel WHERE id = ?", (row["koppel_id"],)).fetchone()
+    if not koppel:
+        conn.close()
+        return None
+    result = _enrich_koppel(conn, dict(koppel))
+    conn.close()
+    return result
 
 
 def get_koppels_by_begeleider(begeleider_eckid: str) -> list[dict]:
@@ -228,8 +268,9 @@ def get_koppels_by_begeleider(begeleider_eckid: str) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM pws_koppel WHERE begeleider_id = ?", (begeleider_eckid,)
     ).fetchall()
+    result = [_enrich_koppel(conn, dict(r)) for r in rows]
     conn.close()
-    return [dict(r) for r in rows]
+    return result
 
 
 def get_unclaimed_koppels() -> list[dict]:
@@ -237,8 +278,9 @@ def get_unclaimed_koppels() -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM pws_koppel WHERE begeleider_id IS NULL"
     ).fetchall()
+    result = [_enrich_koppel(conn, dict(r)) for r in rows]
     conn.close()
-    return [dict(r) for r in rows]
+    return result
 
 
 def claim_koppel(koppel_id: int, begeleider_eckid: str) -> None:
@@ -337,7 +379,7 @@ def add_commentaar(koppel_id: int, auteur_eckid: str, tekst: str) -> None:
 def get_commentaar(koppel_id: int) -> list[dict]:
     conn = get_conn()
     rows = conn.execute("""
-        SELECT c.*, u.naam AS auteur_naam
+        SELECT c.*, u.naam AS auteur_naam, u.rol AS auteur_rol
         FROM pws_commentaar c
         JOIN users u ON c.auteur_id = u.eckid
         WHERE c.koppel_id = ?
@@ -375,5 +417,16 @@ def get_all_koppels_with_info() -> list[dict]:
         else:
             k["begeleider_naam"] = None
         result.append(k)
+    conn.close()
+    return result
+
+
+# ── Coordinator helpers ───────────────────────────────────────────────────────
+
+def get_all_koppels_enriched() -> list[dict]:
+    """Alle koppels verrijkt met leden, onderzoek en voortgang."""
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM pws_koppel ORDER BY id").fetchall()
+    result = [_enrich_koppel(conn, dict(r)) for r in rows]
     conn.close()
     return result

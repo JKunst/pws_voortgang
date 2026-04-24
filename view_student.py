@@ -27,7 +27,7 @@ def _fmt_datum(d: date) -> str:
 
 def render_student(user: dict) -> None:
     # Geen koppel? Dan eerst verplicht partner kiezen.
-    koppel = db.get_my_koppel(user["id"])
+    koppel = db.get_my_koppel(user["eckid"])
     if koppel is None:
         _render_partner_onboarding(user)
         return
@@ -61,7 +61,7 @@ def render_student(user: dict) -> None:
 # ===================== Header / onboarding =====================
 
 def _render_header(user: dict, koppel: dict) -> None:
-    partners = [m for m in koppel["leden"] if m["id"] != user["id"]]
+    partners = [m for m in koppel["leden"] if m["eckid"] != user["eckid"]]
     klas = f" — klas {user['klas']}" if user.get("klas") else ""
     if partners:
         partner_naam = partners[0]["naam"]
@@ -81,14 +81,14 @@ def _render_partner_onboarding(user: dict) -> None:
 
 def _render_partner_selector(user: dict, prefix: str, toon_current: bool = True) -> None:
     """Herbruikbare partner-picker. Prefix zorgt voor unieke widget-keys."""
-    beschikbaar = db.get_available_partners(user["id"])
+    beschikbaar = db.get_available_partners(user["eckid"])
     opties = ["— Solo (geen partner) —"] + [p["naam"] for p in beschikbaar]
-    id_per_naam = {p["naam"]: p["id"] for p in beschikbaar}
+    id_per_naam = {p["naam"]: p["eckid"] for p in beschikbaar}
 
-    huidige_koppel = db.get_my_koppel(user["id"])
+    huidige_koppel = db.get_my_koppel(user["eckid"])
     huidige_partner = None
     if huidige_koppel:
-        partners = [m for m in huidige_koppel["leden"] if m["id"] != user["id"]]
+        partners = [m for m in huidige_koppel["leden"] if m["eckid"] != user["eckid"]]
         if partners:
             huidige_partner = partners[0]
 
@@ -121,7 +121,7 @@ def _render_partner_selector(user: dict, prefix: str, toon_current: bool = True)
         if keuze != "— Solo (geen partner) —":
             partner_id = id_per_naam[keuze]
         try:
-            db.set_partner(user["id"], partner_id)
+            db.set_partner(user["eckid"], partner_id)
             st.success("Opgeslagen.")
             st.rerun()
         except ValueError as e:
@@ -178,7 +178,7 @@ def _tab_onderzoek(user: dict, koppel: dict) -> None:
         _render_partner_selector(user, prefix="ond", toon_current=True)
 
     st.subheader("Onderwerp en onderzoeksvragen")
-    partners = [m for m in koppel["leden"] if m["id"] != user["id"]]
+    partners = [m for m in koppel["leden"] if m["eckid"] != user["eckid"]]
     if partners:
         st.caption(
             f"Wat je hier invult, wordt gedeeld met **{partners[0]['naam']}**. "

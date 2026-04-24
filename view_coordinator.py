@@ -32,12 +32,7 @@ def render_coordinator(user: dict) -> None:
 
 def _fetch_all_koppels() -> list[dict]:
     """Haal alle koppels op (zowel met als zonder begeleider)."""
-    conn = db.get_conn()
-    try:
-        rows = conn.execute("SELECT id FROM pws_koppel ORDER BY id").fetchall()
-    finally:
-        conn.close()
-    return [db.get_koppel(r["id"]) for r in rows]
+    return db.get_all_koppels_enriched()
 
 
 def _bepaal_status(k: dict, vandaag: date) -> str:
@@ -52,10 +47,10 @@ def _bepaal_status(k: dict, vandaag: date) -> str:
     return "Op schema"
 
 
-def _begeleider_naam(begeleider_id: int | None) -> str:
+def _begeleider_naam(begeleider_id: str | None) -> str:
     if begeleider_id is None:
         return "— (nog geen begeleider)"
-    user = db.get_user_by_id(begeleider_id)
+    user = db.get_user_by_eckid(begeleider_id)
     return user["naam"] if user else "— (onbekend)"
 
 

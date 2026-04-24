@@ -17,7 +17,7 @@ def render_begeleider(user: dict) -> None:
     render_tijdlijn(vandaag)
     render_status_cards(vandaag)
 
-    eigen = db.get_koppels_by_begeleider(user["id"])
+    eigen = db.get_koppels_by_begeleider(user["eckid"])
     beschikbaar = db.get_unclaimed_koppels()
 
     tab_mijn, tab_beschikbaar = st.tabs([
@@ -181,7 +181,7 @@ def _tab_beschikbare_koppels(user: dict, koppels: list[dict]) -> None:
 
             if st.button("Neem aan", type="primary", key=f"claim_{k['id']}"):
                 try:
-                    db.claim_koppel(k["id"], user["id"])
+                    db.claim_koppel(k["id"], user["eckid"])
                     st.success("Koppel toegevoegd aan je dashboard.")
                     st.rerun()
                 except ValueError as e:
@@ -289,7 +289,7 @@ def _render_commentaar_sectie(begeleider: dict, k: dict) -> None:
     )
     if st.button("Feedback versturen", key=f"send_fb_{k['id']}"):
         if tekst.strip():
-            db.add_commentaar(k["id"], begeleider["id"], tekst.strip())
+            db.add_commentaar(k["id"], begeleider["eckid"], tekst.strip())
             st.session_state[nieuwe_key] = ""
             st.rerun()
         else:
