@@ -1,88 +1,121 @@
-"""SQLite-helpers voor de PWS-app.
+"""
+db.py — SQLite helpers voor de PWS-app.
+
+Primaire sleutel: ECK-iD (via portaal-token).
+Geen wachtwoorden, geen gebruikersnamen.
 
 Datamodel:
-    users
-        begeleiders en leerlingen; elke leerling zit in een pws_koppel.
-    pws_koppel
-        groep van 1 of 2 leerlingen. Eventueel gekoppeld aan een begeleider.
-    pws_onderzoek
-        onderwerp/vak/hoofdvraag/deelvragen, één rij per koppel (partners delen).
-    pws_voortgang
-        afgevinkte deadlines, per koppel.
-    pws_commentaar
-        feedback van begeleider aan koppel (thread, nieuwste bovenaan).
+    users         — leerlingen, begeleiders, coordinatoren (ECK-iD als PK)
+    pws_koppel    — groep van 1 of 2 leerlingen, optioneel gekoppeld aan begeleider
+    pws_onderzoek — onderwerp/vak/hoofdvraag/deelvragen per koppel
+    pws_voortgang — afgevinkte deadlines per koppel
+    pws_commentaar — feedback van begeleider aan koppel
 """
 
 from __future__ import annotations
-
-import hashlib
 import json
-import os
 import sqlite3
 from pathlib import Path
+import os
 
-DB_PATH = Path(__file__).parent / "pws.db"
+DB_PATH = Path(os.environ.get("PWS_DB_PATH", str(Path(__file__).parent / "pws.db")))
 
 
-# ========== Connectie ==========
+# ── Connectie ─────────────────────────────────────────────────────────────────
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
 def ensure_db() -> None:
-    if DB_PATH.exists():
-        return
-    from init_db import initialize
-    initialize()
+    if not DB_PATH.exists():
+        _init_schema()
 
 
-# ========== Wachtwoorden ==========
-
-def hash_password(password: str) -> str:
-    salt = os.urandom(16)
-    h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
-    return salt.hex() + ":" + h.hex()
-
-
-def check_password(password: str, stored: str) -> bool:
-    try:
-        salt_hex, hash_hex = stored.split(":")
-        salt = bytes.fromhex(salt_hex)
-        h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
-        return h.hex() == hash_hex
-    except Exception:
-        return False
-
-
-# ========== Gebruikers ==========
-
-def get_user_by_username(username: str) -> dict | None:
+def _init_schema():
     conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT * FROM users WHERE username = ?", (username,)
-        ).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            eckid     TEXT PRIMARY KEY,
+            naam      TEXT NOT NULL,
+            rol       TEXT NOT NULL CHECK (rol IN ('student', 'begeleider', 'coordinator')),
+            koppel_id INTEGER REFERENCES pws_koppel(id) ON DELETE SET NULL,
+            klas      TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS pws_koppel (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            begeleider_id TEXT REFERENCES users(eckid) ON DELETE SET NULL,
+            aangemaakt    TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS pws_onderzoek (
+            koppel_id       INTEGER PRIMARY KEY REFERENCES pws_koppel(id) ON DELETE CASCADE,
+            onderwerp       TEXT,
+            vak             TEXT,
+            hoofdvraag      TEXT,
+            deelvragen_json TEXT,
+            bijgewerkt      TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS pws_voortgang (
+            koppel_id INTEGER NOT NULL REFERENCES pws_koppel(id) ON DELETE CASCADE,
+            sleutel   TEXT NOT NULL,
+            voltooid  INTEGER NOT NULL DEFAULT 0,
+            gewijzigd TEXT,
+            PRIMARY KEY (koppel_id, sleutel)
+        );
+
+        CREATE TABLE IF NOT EXISTS pws_commentaar (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            koppel_id  INTEGER NOT NULL REFERENCES pws_koppel(id)  ON DELETE CASCADE,
+            auteur_id  TEXT    NOT NULL REFERENCES users(eckid)     ON DELETE CASCADE,
+            tekst      TEXT    NOT NULL,
+            aangemaakt TEXT    NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_users_koppel ON users(koppel_id);
+        CREATE INDEX IF NOT EXISTS idx_koppel_bg    ON pws_koppel(begeleider_id);
+        CREATE INDEX IF NOT EXISTS idx_comm_koppel  ON pws_commentaar(koppel_id);
+    """)
+    conn.commit()
+    conn.close()
 
 
-def get_user_by_id(user_id: int) -> dict | None:
+# ── SSO-login ─────────────────────────────────────────────────────────────────
+
+def sso_upsert_user(eckid: str, naam: str, rol: str, klas: str = None) -> dict:
+    """
+    Sla gebruiker op na SSO-login via portaal-token.
+    Maakt aan als nieuw, updatet naam/klas als bestaand.
+    Rol wordt altijd overschreven vanuit het token (beheerd door portaal).
+    """
     conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT * FROM users WHERE id = ?", (user_id,)
-        ).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    conn.execute("""
+        INSERT INTO users (eckid, naam, rol, klas)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(eckid) DO UPDATE SET
+            naam = excluded.naam,
+            rol  = excluded.rol,
+            klas = excluded.klas
+    """, (eckid, naam, rol, klas))
+    conn.commit()
+    user = conn.execute("SELECT * FROM users WHERE eckid = ?", (eckid,)).fetchone()
+    conn.close()
+    return dict(user)
 
 
-# ========== Koppel-beheer ==========
+def get_user_by_eckid(eckid: str) -> dict | None:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM users WHERE eckid = ?", (eckid,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+# ── Koppel-beheer ─────────────────────────────────────────────────────────────
 
 def _create_koppel(conn) -> int:
     cur = conn.execute(
@@ -91,253 +124,143 @@ def _create_koppel(conn) -> int:
     return cur.lastrowid
 
 
-def _assign_to_koppel(conn, student_id: int, koppel_id: int) -> None:
-    conn.execute("UPDATE users SET koppel_id = ? WHERE id = ?", (koppel_id, student_id))
+def _assign_to_koppel(conn, eckid: str, koppel_id: int) -> None:
+    conn.execute("UPDATE users SET koppel_id = ? WHERE eckid = ?", (koppel_id, eckid))
 
 
-def _leave_and_cleanup(conn, student_id: int) -> None:
-    """Haal student uit huidige koppel; verwijder het koppel als het leeg achterblijft."""
-    row = conn.execute(
-        "SELECT koppel_id FROM users WHERE id = ?", (student_id,)
-    ).fetchone()
-    if not row or row["koppel_id"] is None:
+def _leave_and_cleanup(conn, eckid: str) -> None:
+    row = conn.execute("SELECT koppel_id FROM users WHERE eckid = ?", (eckid,)).fetchone()
+    if not row or not row["koppel_id"]:
         return
-    kid = row["koppel_id"]
-    conn.execute("UPDATE users SET koppel_id = NULL WHERE id = ?", (student_id,))
-    nog_leden = conn.execute(
-        "SELECT COUNT(*) AS n FROM users WHERE koppel_id = ?", (kid,)
-    ).fetchone()["n"]
-    if nog_leden == 0:
-        conn.execute("DELETE FROM pws_koppel WHERE id = ?", (kid,))
+    koppel_id = row["koppel_id"]
+    conn.execute("UPDATE users SET koppel_id = NULL WHERE eckid = ?", (eckid,))
+    remaining = conn.execute(
+        "SELECT COUNT(*) FROM users WHERE koppel_id = ?", (koppel_id,)
+    ).fetchone()[0]
+    if remaining == 0:
+        conn.execute("DELETE FROM pws_koppel WHERE id = ?", (koppel_id,))
 
 
 def get_koppel_members(koppel_id: int) -> list[dict]:
     conn = get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT * FROM users WHERE koppel_id = ? ORDER BY naam", (koppel_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT * FROM users WHERE koppel_id = ?", (koppel_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
-def get_available_partners(student_id: int) -> list[dict]:
-    """Leerlingen die als partner gekozen kunnen worden:
-    - solo (eigen koppel met alleen zichzelf) of zonder koppel
-    - óf al gekoppeld aan deze leerling zelf
-    Uitgesloten: de leerling zelf, leerlingen die al met iemand anders zijn gekoppeld.
-    """
+def get_available_partners(eckid: str) -> list[dict]:
+    """Leerlingen zonder koppel of in een koppel met maar 1 lid (niet de aanvrager zelf)."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT u.* FROM users u
+        WHERE u.rol = 'student'
+          AND u.eckid != ?
+          AND (
+            u.koppel_id IS NULL
+            OR (
+              SELECT COUNT(*) FROM users u2 WHERE u2.koppel_id = u.koppel_id
+            ) < 2
+          )
+        ORDER BY u.naam
+    """, (eckid,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_partner(eckid: str, partner_eckid: str | None) -> None:
     conn = get_conn()
     try:
-        rows = conn.execute(
-            """
-            SELECT u.* FROM users u
-            WHERE u.rol = 'student'
-              AND u.id != ?
-              AND (
-                u.koppel_id IS NULL
-                OR (
-                  SELECT COUNT(*) FROM users u2
-                  WHERE u2.koppel_id = u.koppel_id AND u2.id != u.id AND u2.id != ?
-                ) = 0
-              )
-            ORDER BY u.naam
-            """,
-            (student_id, student_id),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
-
-
-def set_partner(student_id: int, partner_id: int | None) -> None:
-    """Koppel leerling aan partner, of maak zelfstandig (solo) koppel aan.
-
-    Semantiek:
-    - partner_id=None: leerling komt in eigen (solo) koppel.
-    - partner_id=X: leerling komt samen met X in een koppel.
-      X moet vrij zijn (solo of geen koppel).
-
-    Bij koppel-wissel blijven bestaande onderzoeks- en voortgangsgegevens achter bij
-    het oude koppel (dus bij de eventuele andere partner die daar nog zit). Als het
-    oude koppel leeg achterblijft, wordt het verwijderd inclusief alle data.
-    """
-    conn = get_conn()
-    try:
-        student = conn.execute(
-            "SELECT * FROM users WHERE id = ?", (student_id,)
-        ).fetchone()
-        if student is None:
-            raise ValueError("Leerling bestaat niet.")
-        huidig_kid = student["koppel_id"]
-
-        # Solo
-        if partner_id is None:
-            if huidig_kid is not None:
-                n = conn.execute(
-                    "SELECT COUNT(*) AS n FROM users WHERE koppel_id = ?",
-                    (huidig_kid,),
-                ).fetchone()["n"]
-                if n == 1:
-                    conn.commit()
-                    return
-            _leave_and_cleanup(conn, student_id)
-            new_kid = _create_koppel(conn)
-            _assign_to_koppel(conn, student_id, new_kid)
-            conn.commit()
+        me = conn.execute("SELECT * FROM users WHERE eckid = ?", (eckid,)).fetchone()
+        if not me:
             return
 
-        # Partner opgegeven
-        partner = conn.execute(
-            "SELECT * FROM users WHERE id = ?", (partner_id,)
-        ).fetchone()
-        if partner is None or partner["rol"] != "student":
-            raise ValueError("Ongeldige partner.")
+        _leave_and_cleanup(conn, eckid)
 
-        partner_kid = partner["koppel_id"]
-
-        # Al samen?
-        if partner_kid is not None and partner_kid == huidig_kid:
-            leden = conn.execute(
-                "SELECT COUNT(*) AS n FROM users WHERE koppel_id = ?",
-                (huidig_kid,),
-            ).fetchone()["n"]
-            if leden == 2:
-                conn.commit()
+        if partner_eckid is None:
+            koppel_id = _create_koppel(conn)
+            _assign_to_koppel(conn, eckid, koppel_id)
+        else:
+            partner = conn.execute(
+                "SELECT * FROM users WHERE eckid = ?", (partner_eckid,)
+            ).fetchone()
+            if not partner:
                 return
 
-        # Partner beschikbaar?
-        if partner_kid is not None:
-            anderen = conn.execute(
-                "SELECT id FROM users WHERE koppel_id = ? AND id != ?",
-                (partner_kid, partner_id),
-            ).fetchall()
-            andere_ids = [r["id"] for r in anderen]
-            if andere_ids and andere_ids != [student_id]:
-                raise ValueError(f"{partner['naam']} is al gekoppeld aan een andere leerling.")
+            if partner["koppel_id"]:
+                members = conn.execute(
+                    "SELECT COUNT(*) FROM users WHERE koppel_id = ?",
+                    (partner["koppel_id"],)
+                ).fetchone()[0]
+                if members >= 2:
+                    return
+                koppel_id = partner["koppel_id"]
+            else:
+                koppel_id = _create_koppel(conn)
+                _assign_to_koppel(conn, partner_eckid, koppel_id)
 
-        # Voer de koppeling uit
-        _leave_and_cleanup(conn, student_id)
-        if partner_kid is not None:
-            _assign_to_koppel(conn, student_id, partner_kid)
-        else:
-            new_kid = _create_koppel(conn)
-            _assign_to_koppel(conn, student_id, new_kid)
-            _assign_to_koppel(conn, partner_id, new_kid)
+            _assign_to_koppel(conn, eckid, koppel_id)
+
         conn.commit()
     finally:
         conn.close()
 
 
 def get_koppel(koppel_id: int) -> dict | None:
-    """Koppel met leden, begeleider-id, onderzoek (als dict), voortgang (als dict)."""
     conn = get_conn()
-    try:
-        k = conn.execute(
-            "SELECT * FROM pws_koppel WHERE id = ?", (koppel_id,)
-        ).fetchone()
-        if k is None:
-            return None
-        leden = conn.execute(
-            "SELECT * FROM users WHERE koppel_id = ? ORDER BY naam", (koppel_id,)
-        ).fetchall()
-
-        ond_row = conn.execute(
-            "SELECT * FROM pws_onderzoek WHERE koppel_id = ?", (koppel_id,)
-        ).fetchone()
-        if ond_row is None:
-            onderzoek = {
-                "onderwerp": "", "vak": "", "hoofdvraag": "",
-                "deelvragen": [], "bijgewerkt": None,
-            }
-        else:
-            d = dict(ond_row)
-            try:
-                d["deelvragen"] = json.loads(d.pop("deelvragen_json") or "[]")
-            except Exception:
-                d["deelvragen"] = []
-            onderzoek = d
-
-        vrows = conn.execute(
-            "SELECT sleutel, voltooid FROM pws_voortgang WHERE koppel_id = ?",
-            (koppel_id,),
-        ).fetchall()
-        voortgang = {r["sleutel"]: bool(r["voltooid"]) for r in vrows}
-
-        return {
-            "id": koppel_id,
-            "begeleider_id": k["begeleider_id"],
-            "aangemaakt": k["aangemaakt"],
-            "leden": [dict(r) for r in leden],
-            "onderzoek": onderzoek,
-            "voortgang": voortgang,
-        }
-    finally:
-        conn.close()
+    row = conn.execute("SELECT * FROM pws_koppel WHERE id = ?", (koppel_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
-def get_my_koppel(student_id: int) -> dict | None:
-    user = get_user_by_id(student_id)
-    if not user or not user.get("koppel_id"):
+def get_my_koppel(eckid: str) -> dict | None:
+    conn = get_conn()
+    row = conn.execute("SELECT koppel_id FROM users WHERE eckid = ?", (eckid,)).fetchone()
+    conn.close()
+    if not row or not row["koppel_id"]:
         return None
-    return get_koppel(user["koppel_id"])
+    return get_koppel(row["koppel_id"])
 
 
-def get_koppels_by_begeleider(begeleider_id: int) -> list[dict]:
+def get_koppels_by_begeleider(begeleider_eckid: str) -> list[dict]:
     conn = get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT id FROM pws_koppel WHERE begeleider_id = ? ORDER BY id",
-            (begeleider_id,),
-        ).fetchall()
-    finally:
-        conn.close()
-    return [get_koppel(r["id"]) for r in rows]
+    rows = conn.execute(
+        "SELECT * FROM pws_koppel WHERE begeleider_id = ?", (begeleider_eckid,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_unclaimed_koppels() -> list[dict]:
     conn = get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT id FROM pws_koppel WHERE begeleider_id IS NULL ORDER BY id"
-        ).fetchall()
-    finally:
-        conn.close()
-    return [get_koppel(r["id"]) for r in rows]
+    rows = conn.execute(
+        "SELECT * FROM pws_koppel WHERE begeleider_id IS NULL"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
-def claim_koppel(koppel_id: int, begeleider_id: int) -> None:
+def claim_koppel(koppel_id: int, begeleider_eckid: str) -> None:
     conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT begeleider_id FROM pws_koppel WHERE id = ?", (koppel_id,)
-        ).fetchone()
-        if row is None:
-            raise ValueError("Koppel bestaat niet.")
-        if row["begeleider_id"] is not None and row["begeleider_id"] != begeleider_id:
-            raise ValueError("Dit koppel heeft al een andere begeleider.")
-        conn.execute(
-            "UPDATE pws_koppel SET begeleider_id = ? WHERE id = ?",
-            (begeleider_id, koppel_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute(
+        "UPDATE pws_koppel SET begeleider_id = ? WHERE id = ?",
+        (begeleider_eckid, koppel_id)
+    )
+    conn.commit()
+    conn.close()
 
 
 def release_koppel(koppel_id: int) -> None:
     conn = get_conn()
-    try:
-        conn.execute(
-            "UPDATE pws_koppel SET begeleider_id = NULL WHERE id = ?", (koppel_id,)
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute(
+        "UPDATE pws_koppel SET begeleider_id = NULL WHERE id = ?", (koppel_id,)
+    )
+    conn.commit()
+    conn.close()
 
 
-# ========== Onderzoek (per koppel) ==========
+# ── Onderzoek ─────────────────────────────────────────────────────────────────
 
 def save_onderzoek(
     koppel_id: int,
@@ -347,127 +270,110 @@ def save_onderzoek(
     deelvragen: list[str],
 ) -> None:
     conn = get_conn()
-    try:
-        conn.execute(
-            """
-            INSERT INTO pws_onderzoek
-              (koppel_id, onderwerp, vak, hoofdvraag, deelvragen_json, bijgewerkt)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(koppel_id) DO UPDATE SET
-              onderwerp       = excluded.onderwerp,
-              vak             = excluded.vak,
-              hoofdvraag      = excluded.hoofdvraag,
-              deelvragen_json = excluded.deelvragen_json,
-              bijgewerkt      = excluded.bijgewerkt
-            """,
-            (
-                koppel_id, onderwerp, vak, hoofdvraag,
-                json.dumps(deelvragen, ensure_ascii=False),
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute("""
+        INSERT INTO pws_onderzoek
+            (koppel_id, onderwerp, vak, hoofdvraag, deelvragen_json, bijgewerkt)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(koppel_id) DO UPDATE SET
+            onderwerp       = excluded.onderwerp,
+            vak             = excluded.vak,
+            hoofdvraag      = excluded.hoofdvraag,
+            deelvragen_json = excluded.deelvragen_json,
+            bijgewerkt      = excluded.bijgewerkt
+    """, (koppel_id, onderwerp, vak, hoofdvraag, json.dumps(deelvragen)))
+    conn.commit()
+    conn.close()
 
 
-# ========== Voortgang (per koppel) ==========
+def get_onderzoek(koppel_id: int) -> dict | None:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM pws_onderzoek WHERE koppel_id = ?", (koppel_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    r = dict(row)
+    r["deelvragen"] = json.loads(r["deelvragen_json"] or "[]")
+    return r
+
+
+# ── Voortgang ─────────────────────────────────────────────────────────────────
 
 def set_voortgang(koppel_id: int, sleutel: str, voltooid: bool) -> None:
     conn = get_conn()
-    try:
-        conn.execute(
-            """
-            INSERT INTO pws_voortgang (koppel_id, sleutel, voltooid, gewijzigd)
-            VALUES (?, ?, ?, datetime('now'))
-            ON CONFLICT(koppel_id, sleutel) DO UPDATE SET
-              voltooid  = excluded.voltooid,
-              gewijzigd = excluded.gewijzigd
-            """,
-            (koppel_id, sleutel, int(voltooid)),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute("""
+        INSERT INTO pws_voortgang (koppel_id, sleutel, voltooid, gewijzigd)
+        VALUES (?, ?, ?, datetime('now'))
+        ON CONFLICT(koppel_id, sleutel) DO UPDATE SET
+            voltooid  = excluded.voltooid,
+            gewijzigd = excluded.gewijzigd
+    """, (koppel_id, sleutel, int(voltooid)))
+    conn.commit()
+    conn.close()
 
 
-# ========== Commentaar (feedback van begeleider) ==========
-
-def add_commentaar(koppel_id: int, auteur_id: int, tekst: str) -> None:
+def get_voortgang(koppel_id: int) -> dict[str, bool]:
     conn = get_conn()
-    try:
-        conn.execute(
-            """
-            INSERT INTO pws_commentaar (koppel_id, auteur_id, tekst, aangemaakt)
-            VALUES (?, ?, ?, datetime('now'))
-            """,
-            (koppel_id, auteur_id, tekst),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT sleutel, voltooid FROM pws_voortgang WHERE koppel_id = ?", (koppel_id,)
+    ).fetchall()
+    conn.close()
+    return {r["sleutel"]: bool(r["voltooid"]) for r in rows}
+
+
+# ── Commentaar ────────────────────────────────────────────────────────────────
+
+def add_commentaar(koppel_id: int, auteur_eckid: str, tekst: str) -> None:
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO pws_commentaar (koppel_id, auteur_id, tekst, aangemaakt)
+        VALUES (?, ?, ?, datetime('now'))
+    """, (koppel_id, auteur_eckid, tekst))
+    conn.commit()
+    conn.close()
 
 
 def get_commentaar(koppel_id: int) -> list[dict]:
-    """Nieuwste eerst."""
     conn = get_conn()
-    try:
-        rows = conn.execute(
-            """
-            SELECT c.id, c.tekst, c.aangemaakt, u.naam AS auteur_naam, u.rol AS auteur_rol
-            FROM pws_commentaar c
-            JOIN users u ON u.id = c.auteur_id
-            WHERE c.koppel_id = ?
-            ORDER BY c.aangemaakt DESC, c.id DESC
-            """,
-            (koppel_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    rows = conn.execute("""
+        SELECT c.*, u.naam AS auteur_naam
+        FROM pws_commentaar c
+        JOIN users u ON c.auteur_id = u.eckid
+        WHERE c.koppel_id = ?
+        ORDER BY c.aangemaakt DESC
+    """, (koppel_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
-def delete_commentaar(commentaar_id: int, auteur_id: int) -> None:
-    """Alleen de auteur mag zijn/haar commentaar verwijderen."""
+def delete_commentaar(commentaar_id: int, auteur_eckid: str) -> None:
     conn = get_conn()
-    try:
-        conn.execute(
-            "DELETE FROM pws_commentaar WHERE id = ? AND auteur_id = ?",
-            (commentaar_id, auteur_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute(
+        "DELETE FROM pws_commentaar WHERE id = ? AND auteur_id = ?",
+        (commentaar_id, auteur_eckid)
+    )
+    conn.commit()
+    conn.close()
 
 
-# ========== SSO-koppeling ==========
+# ── Overzicht voor coordinator ────────────────────────────────────────────────
 
-def migrate_add_email() -> None:
-    """Voeg email-kolom toe als die nog niet bestaat (eenmalige migratie)."""
+def get_all_koppels_with_info() -> list[dict]:
     conn = get_conn()
-    try:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
-        if "email" not in cols:
-            conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
-            conn.commit()
-    finally:
-        conn.close()
-
-
-def get_user_by_email(email: str) -> dict | None:
-    """Zoek gebruiker op via e-mailadres (voor SSO-login)."""
-    conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT * FROM users WHERE email = ?", (email,)
-        ).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
-
-
-def sso_of_maak_student(email: str, naam: str, leerlingnummer: str) -> dict | None:
-    """
-    Zoek student op via email. Geeft None als de student niet bestaat —
-    beheerder moet student eerst aanmaken in de PWS-app.
-    """
-    return get_user_by_email(email)
+    koppels = conn.execute("SELECT * FROM pws_koppel ORDER BY aangemaakt").fetchall()
+    result = []
+    for k in koppels:
+        k = dict(k)
+        k["members"] = get_koppel_members(k["id"])
+        k["onderzoek"] = get_onderzoek(k["id"])
+        if k["begeleider_id"]:
+            beg = conn.execute(
+                "SELECT naam FROM users WHERE eckid = ?", (k["begeleider_id"],)
+            ).fetchone()
+            k["begeleider_naam"] = beg["naam"] if beg else "Onbekend"
+        else:
+            k["begeleider_naam"] = None
+        result.append(k)
+    conn.close()
+    return result
