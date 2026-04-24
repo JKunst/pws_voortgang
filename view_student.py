@@ -107,7 +107,7 @@ def _render_partner_selector(user: dict, prefix: str, toon_current: bool = True)
         "Partner kiezen",
         opties,
         index=index,
-        key=f"{prefix}_partner_select_{user['id']}",
+        key=f"{prefix}_partner_select_{user['eckid']}",
     )
 
     if huidige_partner is not None:
