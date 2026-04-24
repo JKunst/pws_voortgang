@@ -116,7 +116,7 @@ def _render_partner_selector(user: dict, prefix: str, toon_current: bool = True)
             "een leeg onderzoek start. Bestaande data blijft bij het oude koppel."
         )
 
-    if st.button("Opslaan", type="primary", key=f"{prefix}_save_{user['id']}"):
+    if st.button("Opslaan", type="primary", key=f"{prefix}_save_{user['eckid']}"):
         partner_id = None
         if keuze != "— Solo (geen partner) —":
             partner_id = id_per_naam[keuze]
