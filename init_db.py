@@ -1,206 +1,118 @@
-"""Database-initialisatie met demo-data. Draaien met: python init_db.py"""
+"""
+init_db.py — Seed de PWS-database met demo-data voor lokaal testen.
+
+Gebruik:
+    python init_db.py
+
+Dit werkt met het huidige ECK-iD schema (geen wachtwoorden).
+Alle ECK-iDs beginnen met 'demo_' zodat ze makkelijk te herkennen zijn.
+
+Voor SSO-gebaseerde login: gebruik het portaal met testmodus.
+Dit script is bedoeld voor lokale ontwikkeling zonder portaal.
+"""
 
 from __future__ import annotations
-
 import json
 import sqlite3
 import sys
-
-from db import DB_PATH, hash_password
-
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS pws_koppel (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    begeleider_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    aangemaakt    TEXT
-);
-
-CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    username      TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    naam          TEXT NOT NULL,
-    rol           TEXT NOT NULL CHECK (rol IN ('student', 'begeleider', 'coordinator')),
-    koppel_id     INTEGER REFERENCES pws_koppel(id) ON DELETE SET NULL,
-    klas          TEXT
-);
-
-CREATE TABLE IF NOT EXISTS pws_onderzoek (
-    koppel_id       INTEGER PRIMARY KEY REFERENCES pws_koppel(id) ON DELETE CASCADE,
-    onderwerp       TEXT,
-    vak             TEXT,
-    hoofdvraag      TEXT,
-    deelvragen_json TEXT,
-    bijgewerkt      TEXT
-);
-
-CREATE TABLE IF NOT EXISTS pws_voortgang (
-    koppel_id INTEGER NOT NULL REFERENCES pws_koppel(id) ON DELETE CASCADE,
-    sleutel   TEXT NOT NULL,
-    voltooid  INTEGER NOT NULL DEFAULT 0,
-    gewijzigd TEXT,
-    PRIMARY KEY (koppel_id, sleutel)
-);
-
-CREATE TABLE IF NOT EXISTS pws_commentaar (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    koppel_id  INTEGER NOT NULL REFERENCES pws_koppel(id) ON DELETE CASCADE,
-    auteur_id  INTEGER NOT NULL REFERENCES users(id)       ON DELETE CASCADE,
-    tekst      TEXT NOT NULL,
-    aangemaakt TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_users_koppel  ON users(koppel_id);
-CREATE INDEX IF NOT EXISTS idx_koppel_bg     ON pws_koppel(begeleider_id);
-CREATE INDEX IF NOT EXISTS idx_comm_koppel   ON pws_commentaar(koppel_id);
-"""
+from db import DB_PATH, get_conn, _init_schema
 
 
-def _add_user(conn, username, password, naam, rol, klas=None):
+def seed() -> None:
+    _init_schema()
+    conn = get_conn()
+
+    # ── Gebruikers ────────────────────────────────────────────────────────────
+    gebruikers = [
+        ("demo_coordinator",  "M. Gijssen",      "coordinator", None),
+        ("demo_beg_troost",   "C. Troostwijk",    "begeleider",  None),
+        ("demo_beg_maas",     "J. van der Waal",  "begeleider",  None),
+        ("demo_jaap",         "Jaap de Goede",    "student",     "h5a"),
+        ("demo_jonathan",     "Jonathan de Groot","student",     "h5a"),
+        ("demo_eva",          "Eva Jansen",       "student",     "h5b"),
+        ("demo_sanne",        "Sanne Hendriks",   "student",     "h5b"),
+        ("demo_amira",        "Amira Yildiz",     "student",     "h5a"),
+        ("demo_tim",          "Tim Bakker",       "student",     "h5a"),
+        ("demo_lars",         "Lars Visser",      "student",     "h5b"),
+        ("demo_sam",          "Sam Okonkwo",      "student",     "h5b"),
+    ]
+    for eckid, naam, rol, klas in gebruikers:
+        conn.execute("""
+            INSERT INTO users (eckid, naam, rol, klas)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(eckid) DO UPDATE SET naam=excluded.naam
+        """, (eckid, naam, rol, klas))
+    conn.commit()
+
+    # ── Koppel 1: Jaap + Jonathan, Troostwijk, plan_van_aanpak af ─────────────
     cur = conn.execute(
-        "INSERT INTO users (username, password_hash, naam, rol, klas) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (username, hash_password(password), naam, rol, klas),
+        "INSERT INTO pws_koppel (begeleider_id, aangemaakt) VALUES ('demo_beg_troost', datetime('now'))"
     )
-    return cur.lastrowid
+    k1 = cur.lastrowid
+    conn.execute("UPDATE users SET koppel_id=? WHERE eckid IN ('demo_jaap','demo_jonathan')", (k1,))
+    conn.execute("""
+        INSERT INTO pws_onderzoek (koppel_id, onderwerp, vak, hoofdvraag, deelvragen_json, bijgewerkt)
+        VALUES (?, 'Luchtwrijving op voertuigen', 'Natuurkunde',
+                'Van welke factoren hangt de luchtwrijving op een voertuig af?',
+                '["Wat is luchtwrijving?","Welke vormfactoren spelen een rol?"]',
+                datetime('now'))
+    """, (k1,))
+    conn.execute("INSERT INTO pws_voortgang (koppel_id, sleutel, voltooid, gewijzigd) VALUES (?,?,1,datetime('now'))",
+                 (k1, "plan_van_aanpak"))
+    conn.execute("INSERT INTO pws_commentaar (koppel_id, auteur_id, tekst, aangemaakt) VALUES (?,?,?,datetime('now'))",
+                 (k1, "demo_beg_troost", "Goed begin, mooie hoofdvraag!"))
 
-
-def _create_koppel(conn, begeleider_id=None):
+    # ── Koppel 2: Eva + Sanne, Troostwijk, alleen onderwerp ───────────────────
     cur = conn.execute(
-        "INSERT INTO pws_koppel (begeleider_id, aangemaakt) VALUES (?, datetime('now'))",
-        (begeleider_id,),
+        "INSERT INTO pws_koppel (begeleider_id, aangemaakt) VALUES ('demo_beg_troost', datetime('now'))"
     )
-    return cur.lastrowid
+    k2 = cur.lastrowid
+    conn.execute("UPDATE users SET koppel_id=? WHERE eckid IN ('demo_eva','demo_sanne')", (k2,))
+    conn.execute("""
+        INSERT INTO pws_onderzoek (koppel_id, onderwerp, vak, hoofdvraag, deelvragen_json, bijgewerkt)
+        VALUES (?, 'Microplastics in de Noordzee', 'Biologie', '', '[]', datetime('now'))
+    """, (k2,))
 
-
-def _place_in_koppel(conn, user_id, koppel_id):
-    conn.execute("UPDATE users SET koppel_id = ? WHERE id = ?", (koppel_id, user_id))
-
-
-def _add_onderzoek(conn, koppel_id, onderwerp, vak, hoofdvraag, deelvragen):
-    conn.execute(
-        "INSERT INTO pws_onderzoek "
-        "(koppel_id, onderwerp, vak, hoofdvraag, deelvragen_json, bijgewerkt) "
-        "VALUES (?, ?, ?, ?, ?, datetime('now'))",
-        (
-            koppel_id, onderwerp, vak, hoofdvraag,
-            json.dumps(deelvragen, ensure_ascii=False),
-        ),
+    # ── Koppel 3: Amira + Tim, geen begeleider, volledig ingevuld ────────────
+    cur = conn.execute(
+        "INSERT INTO pws_koppel (begeleider_id, aangemaakt) VALUES (NULL, datetime('now'))"
     )
+    k3 = cur.lastrowid
+    conn.execute("UPDATE users SET koppel_id=? WHERE eckid IN ('demo_amira','demo_tim')", (k3,))
+    conn.execute("""
+        INSERT INTO pws_onderzoek (koppel_id, onderwerp, vak, hoofdvraag, deelvragen_json, bijgewerkt)
+        VALUES (?, 'Spectra van lichtbronnen', 'Natuurkunde',
+                'Welke verschillen zijn er tussen spectra van gloeilamp, TL-buis en zon?',
+                '["Hoe ontstaat een lichtspectrum?","Hoe meet je een spectrum?"]',
+                datetime('now'))
+    """, (k3,))
 
-
-def _add_voortgang(conn, koppel_id, sleutel):
-    conn.execute(
-        "INSERT INTO pws_voortgang (koppel_id, sleutel, voltooid, gewijzigd) "
-        "VALUES (?, ?, 1, datetime('now'))",
-        (koppel_id, sleutel),
+    # ── Koppel 4: Lars solo, geen begeleider ──────────────────────────────────
+    cur = conn.execute(
+        "INSERT INTO pws_koppel (begeleider_id, aangemaakt) VALUES (NULL, datetime('now'))"
     )
+    k4 = cur.lastrowid
+    conn.execute("UPDATE users SET koppel_id=? WHERE eckid='demo_lars'", (k4,))
 
+    # Sam Okonkwo bewust zonder koppel (onboarding-test)
 
-def _add_commentaar(conn, koppel_id, auteur_id, tekst):
-    conn.execute(
-        "INSERT INTO pws_commentaar (koppel_id, auteur_id, tekst, aangemaakt) "
-        "VALUES (?, ?, ?, datetime('now'))",
-        (koppel_id, auteur_id, tekst),
-    )
-
-
-def initialize() -> None:
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        conn.executescript(SCHEMA)
-
-        # Begeleiders
-        troostwijk_id = _add_user(conn, "c.troostwijk", "begeleider", "C. Troostwijk",  "begeleider")
-        vdmaas_id     = _add_user(conn, "j.vandermaas", "begeleider", "J. van der Maas","begeleider")
-
-        # Coördinator
-        _gijsbers_id  = _add_user(conn, "m.gijsbers",   "coordinator","M. Gijsbers",    "coordinator")
-
-        # Leerlingen (variatie aan namen, verdeeld over verschillende statussen)
-        jaap_id     = _add_user(conn, "jaap.degoede",    "pws2026", "Jaap de Goede",     "student", "h5a")
-        jonathan_id = _add_user(conn, "jonathan.degroot","pws2026", "Jonathan de Groot", "student", "h5a")
-        eva_id      = _add_user(conn, "eva.jansen",      "pws2026", "Eva Jansen",        "student", "h5b")
-        sanne_id    = _add_user(conn, "sanne.hendriks",  "pws2026", "Sanne Hendriks",    "student", "h5b")
-        amira_id    = _add_user(conn, "amira.yildiz",    "pws2026", "Amira Yildiz",      "student", "h5a")
-        tim_id      = _add_user(conn, "tim.bakker",      "pws2026", "Tim Bakker",        "student", "h5a")
-        lars_id     = _add_user(conn, "lars.visser",     "pws2026", "Lars Visser",       "student", "h5b")
-        # Nieuwe leerling zonder koppel — voor testen van de onboarding-flow
-        _           = _add_user(conn, "nieuwe.leerling", "pws2026", "Sam Okonkwo",       "student", "h5b")
-
-        # --- Koppel 1: Jaap + Jonathan, aangenomen door Troostwijk, volledig + 1 deadline af ---
-        k1 = _create_koppel(conn, begeleider_id=troostwijk_id)
-        _place_in_koppel(conn, jaap_id, k1)
-        _place_in_koppel(conn, jonathan_id, k1)
-        _add_onderzoek(
-            conn, k1,
-            "Luchtwrijving op voertuigen", "Natuurkunde",
-            "Van welke factoren hangt de luchtwrijving op een voertuig af, en "
-            "wat is het verband tussen elk van die factoren en de grootte van "
-            "de luchtwrijving?",
-            [
-                "Wat is luchtwrijving en hoe wordt deze berekend?",
-                "Welke vormfactoren beïnvloeden de luchtwrijving op een voertuig?",
-                "Hoe verhoudt de snelheid zich tot de luchtwrijving?",
-                "Hoe meet je luchtwrijving in een schaalmodel in een windtunnel?",
-            ],
-        )
-        _add_voortgang(conn, k1, "plan_van_aanpak")
-        _add_commentaar(
-            conn, k1, troostwijk_id,
-            "Goed begin, mooie hoofdvraag. Zorg dat jullie in de komende weken "
-            "een duidelijke windtunnel-opzet op papier hebben voor we verder "
-            "kunnen.",
-        )
-
-        # --- Koppel 2: Eva + Sanne, aangenomen door Troostwijk, alleen onderwerp ingevuld ---
-        k2 = _create_koppel(conn, begeleider_id=troostwijk_id)
-        _place_in_koppel(conn, eva_id, k2)
-        _place_in_koppel(conn, sanne_id, k2)
-        _add_onderzoek(
-            conn, k2,
-            "Microplastics in de Noordzee", "Biologie",
-            "", [],
-        )
-
-        # --- Koppel 3: Amira + Tim, NOG ZONDER begeleider, volledig ingevuld ---
-        k3 = _create_koppel(conn, begeleider_id=None)
-        _place_in_koppel(conn, amira_id, k3)
-        _place_in_koppel(conn, tim_id, k3)
-        _add_onderzoek(
-            conn, k3,
-            "Spectra van lichtbronnen", "Natuurkunde",
-            "Welke verschillen zijn er tussen het spectrum van een gloeilamp, "
-            "een TL-buis en de zon, en waardoor worden die verschillen "
-            "veroorzaakt?",
-            [
-                "Hoe ontstaat een lichtspectrum?",
-                "Hoe meet je een spectrum betrouwbaar met een eenvoudige opstelling?",
-                "Welke factoren bepalen het spectrum van een gloeilamp?",
-                "Waarom heeft een TL-buis pieken in plaats van een continu spectrum?",
-            ],
-        )
-
-        # --- Koppel 4: Lars solo, NOG ZONDER begeleider, niks ingevuld ---
-        k4 = _create_koppel(conn, begeleider_id=None)
-        _place_in_koppel(conn, lars_id, k4)
-
-        # Sam Okonkwo bewust zonder koppel (onboarding-test)
-
-        conn.commit()
-        print(f"Database aangemaakt: {DB_PATH}")
-    finally:
-        conn.close()
+    conn.commit()
+    conn.close()
+    print(f"✅ Database aangemaakt: {DB_PATH}")
+    print("Demo ECK-iDs:")
+    print("  demo_coordinator  — coördinator")
+    print("  demo_beg_troost   — begeleider")
+    print("  demo_jaap         — student (koppel met Jonathan)")
+    print("  demo_sam          — student (geen koppel)")
+    print()
+    print("Voor SSO-login: gebruik het portaal met TESTMODUS=true.")
 
 
 if __name__ == "__main__":
     if DB_PATH.exists():
-        antwoord = input(
-            f"{DB_PATH} bestaat al. Overschrijven? (typ 'ja' om door te gaan): "
-        )
+        antwoord = input(f"{DB_PATH} bestaat al. Overschrijven? (typ 'ja'): ")
         if antwoord.strip().lower() != "ja":
             print("Afgebroken.")
             sys.exit(0)
         DB_PATH.unlink()
-    initialize()
+    seed()
